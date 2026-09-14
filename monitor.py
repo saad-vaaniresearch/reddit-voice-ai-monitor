@@ -12,6 +12,7 @@ the repo by the workflow after each run.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -63,9 +64,6 @@ KEYWORDS = [
 
 REDDIT_LIMIT = 100  # max items per feed request
 USER_AGENT = "voice-ai-gtm-monitor/1.0 (by u/PlayfulTest4733)"
-FETCH_DELAY_SECONDS = 4  # gap between subreddit fetches - GitHub Actions runners share IPs
-                          # with heavy traffic, so Reddit rate-limits them more aggressively
-                          # than a normal residential IP
 
 OPENROUTER_MODEL = "inclusionai/ling-3.0-flash:free"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -100,44 +98,60 @@ def save_seen_ids(seen_ids: list[str]) -> None:
 # Reddit RSS
 # ---------------------------------------------------------------------------
 
-def fetch_subreddit_posts(subreddit: str) -> list[dict]:
-    """Fetch new posts for one subreddit via its public RSS feed. Never raises;
-    logs and returns an empty list on any failure (missing/private subreddit,
-    rate limit, network error, malformed feed)."""
-    url = f"https://www.reddit.com/r/{urllib.parse.quote(subreddit)}/new.rss?limit={REDDIT_LIMIT}"
-    for attempt in range(2):  # one retry on rate limit, with a longer backoff
+SUBREDDIT_FROM_LINK = re.compile(r"/r/([^/]+)/")
+
+
+def fetch_all_posts() -> list[dict]:
+    """Fetch new posts across every configured subreddit in a SINGLE request,
+    using Reddit's combined multi-subreddit feed (r/a+b+c/new.rss). This is
+    deliberate: one request is far less likely to get anonymous-traffic
+    rate-limited than N separate requests back to back, which is what
+    happened when we polled subreddits one at a time. Never raises; logs
+    and returns an empty list on failure."""
+    combined = "+".join(urllib.parse.quote(s) for s in SUBREDDITS)
+    url = f"https://www.reddit.com/r/{combined}/new.rss?limit={REDDIT_LIMIT}"
+
+    for attempt in range(3):
         try:
-            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
         except requests.RequestException as e:
-            print(f"WARNING: failed to fetch r/{subreddit}: {e}", file=sys.stderr)
+            print(f"WARNING: failed to fetch combined feed: {e}", file=sys.stderr)
             return []
 
         if resp.status_code == 429:
-            if attempt == 0:
-                print(f"WARNING: rate limited on r/{subreddit}, backing off and retrying once", file=sys.stderr)
-                time.sleep(10)
-                continue
-            print(f"WARNING: rate limited on r/{subreddit} again, skipping this run", file=sys.stderr)
-            return []
+            wait = 15 * (attempt + 1)
+            print(f"WARNING: rate limited (attempt {attempt + 1}/3), waiting {wait}s", file=sys.stderr)
+            time.sleep(wait)
+            continue
 
         if resp.status_code != 200:
-            print(f"WARNING: r/{subreddit} returned HTTP {resp.status_code}, skipping", file=sys.stderr)
+            print(
+                f"WARNING: combined feed returned HTTP {resp.status_code}: "
+                f"{resp.text[:300]!r}",
+                file=sys.stderr,
+            )
             return []
 
         break
+    else:
+        print("WARNING: still rate limited after 3 attempts, skipping this run", file=sys.stderr)
+        return []
 
     feed = feedparser.parse(resp.content)
     if feed.bozo and not feed.entries:
-        print(f"WARNING: r/{subreddit} feed did not parse (subreddit may not exist), skipping", file=sys.stderr)
+        print("WARNING: combined feed did not parse, skipping this run", file=sys.stderr)
         return []
 
     posts = []
     for entry in feed.entries:
+        link = entry.get("link", "")
+        match = SUBREDDIT_FROM_LINK.search(link)
+        subreddit = match.group(1) if match else "unknown"
         posts.append({
-            "id": entry.get("id", entry.get("link", "")),
+            "id": entry.get("id", link),
             "title": entry.get("title", ""),
             "summary": entry.get("summary", ""),
-            "link": entry.get("link", ""),
+            "link": link,
             "subreddit": subreddit,
         })
     return posts
@@ -205,7 +219,12 @@ def classify_and_draft(post: dict) -> dict | None:
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            print(
+                f"WARNING: OpenRouter returned HTTP {resp.status_code}: {resp.text[:500]!r}",
+                file=sys.stderr,
+            )
+            return None
     except requests.RequestException as e:
         print(f"WARNING: OpenRouter request failed: {e}", file=sys.stderr)
         return None
@@ -271,45 +290,38 @@ def main() -> None:
     seen_set = set(seen_ids)
     new_seen_ids = list(seen_ids)
 
-    total_fetched = 0
-    total_new = 0
     total_keyword_matches = 0
     total_alerts = 0
 
-    for i, subreddit in enumerate(SUBREDDITS):
-        if i > 0:
-            time.sleep(FETCH_DELAY_SECONDS)  # avoid tripping Reddit's anonymous rate limit
+    posts = fetch_all_posts()
+    total_fetched = len(posts)
 
-        posts = fetch_subreddit_posts(subreddit)
-        total_fetched += len(posts)
+    for post in posts:
+        if post["id"] in seen_set:
+            continue
+        seen_set.add(post["id"])
+        new_seen_ids.append(post["id"])
 
-        for post in posts:
-            if post["id"] in seen_set:
-                continue
-            seen_set.add(post["id"])
-            new_seen_ids.append(post["id"])
-            total_new += 1
+        if not matches_keywords(post):
+            continue
+        total_keyword_matches += 1
 
-            if not matches_keywords(post):
-                continue
-            total_keyword_matches += 1
+        result = classify_and_draft(post)
+        if not result or not result.get("relevant"):
+            continue
 
-            result = classify_and_draft(post)
-            if not result or not result.get("relevant"):
-                continue
+        confidence = float(result.get("confidence", 0))
+        reply_draft = result.get("reply_draft")
 
-            confidence = float(result.get("confidence", 0))
-            reply_draft = result.get("reply_draft")
+        send_slack_alert(post, confidence, reply_draft)
+        total_alerts += 1
 
-            send_slack_alert(post, confidence, reply_draft)
-            total_alerts += 1
-
-            time.sleep(1)  # be polite to the OpenRouter free tier
+        time.sleep(1)  # be polite to the OpenRouter free tier
 
     save_seen_ids(new_seen_ids)
 
     print(
-        f"Run complete. Fetched: {total_fetched}, new: {total_new}, "
+        f"Run complete. Fetched: {total_fetched}, "
         f"keyword matches: {total_keyword_matches}, alerts sent: {total_alerts}"
     )
 
