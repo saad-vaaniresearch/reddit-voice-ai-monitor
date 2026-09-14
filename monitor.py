@@ -104,7 +104,9 @@ def save_seen_ids(seen_ids: list[str]) -> None:
 SUBREDDIT_FROM_LINK = re.compile(r"/r/([^/]+)/")
 
 BATCH_SIZE = 3       # subreddits per combined feed request
-BATCH_DELAY_SECONDS = 8  # gap between batches, to stay well under Reddit's rate limit
+BATCH_DELAY_SECONDS = 20  # gap between batches. Rate limiting appears cumulative across
+                            # a run rather than resetting per-request, so later batches
+                            # need more breathing room than earlier ones.
 
 
 def _chunked(items: list, size: int) -> list[list]:
