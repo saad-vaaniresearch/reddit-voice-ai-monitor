@@ -65,7 +65,10 @@ KEYWORDS = [
 REDDIT_LIMIT = 100  # max items per feed request
 USER_AGENT = "voice-ai-gtm-monitor/1.0 (by u/PlayfulTest4733)"
 
-OPENROUTER_MODEL = "inclusionai/ling-3.0-flash:free"
+OPENROUTER_MODEL = "openrouter/free"  # auto-router that picks whichever free model is
+                                        # currently live - insulates us from any single
+                                        # free model being pulled to paid-only, which is
+                                        # what just happened with the Ling 3.0 Flash slug
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SEEN_IDS_PATH = Path(__file__).parent / "seen_ids.json"
@@ -100,46 +103,48 @@ def save_seen_ids(seen_ids: list[str]) -> None:
 
 SUBREDDIT_FROM_LINK = re.compile(r"/r/([^/]+)/")
 
+BATCH_SIZE = 3       # subreddits per combined feed request
+BATCH_DELAY_SECONDS = 8  # gap between batches, to stay well under Reddit's rate limit
 
-def fetch_all_posts() -> list[dict]:
-    """Fetch new posts across every configured subreddit in a SINGLE request,
-    using Reddit's combined multi-subreddit feed (r/a+b+c/new.rss). This is
-    deliberate: one request is far less likely to get anonymous-traffic
-    rate-limited than N separate requests back to back, which is what
-    happened when we polled subreddits one at a time. Never raises; logs
-    and returns an empty list on failure."""
-    combined = "+".join(urllib.parse.quote(s) for s in SUBREDDITS)
+
+def _chunked(items: list, size: int) -> list[list]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def fetch_one_batch(subreddits: list[str]) -> list[dict]:
+    """Fetch new posts for a small combined-subreddit feed. Never raises;
+    logs and returns an empty list on failure."""
+    combined = "+".join(urllib.parse.quote(s) for s in subreddits)
     url = f"https://www.reddit.com/r/{combined}/new.rss?limit={REDDIT_LIMIT}"
 
     for attempt in range(3):
         try:
             resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
         except requests.RequestException as e:
-            print(f"WARNING: failed to fetch combined feed: {e}", file=sys.stderr)
+            print(f"WARNING: failed to fetch batch {subreddits}: {e}", file=sys.stderr)
             return []
 
         if resp.status_code == 429:
             wait = 15 * (attempt + 1)
-            print(f"WARNING: rate limited (attempt {attempt + 1}/3), waiting {wait}s", file=sys.stderr)
+            print(f"WARNING: rate limited on batch {subreddits} (attempt {attempt + 1}/3), waiting {wait}s", file=sys.stderr)
             time.sleep(wait)
             continue
 
         if resp.status_code != 200:
             print(
-                f"WARNING: combined feed returned HTTP {resp.status_code}: "
-                f"{resp.text[:300]!r}",
+                f"WARNING: batch {subreddits} returned HTTP {resp.status_code}: {resp.text[:300]!r}",
                 file=sys.stderr,
             )
             return []
 
         break
     else:
-        print("WARNING: still rate limited after 3 attempts, skipping this run", file=sys.stderr)
+        print(f"WARNING: batch {subreddits} still rate limited after 3 attempts, skipping", file=sys.stderr)
         return []
 
     feed = feedparser.parse(resp.content)
     if feed.bozo and not feed.entries:
-        print("WARNING: combined feed did not parse, skipping this run", file=sys.stderr)
+        print(f"WARNING: batch {subreddits} feed did not parse, skipping", file=sys.stderr)
         return []
 
     posts = []
@@ -155,6 +160,23 @@ def fetch_all_posts() -> list[dict]:
             "subreddit": subreddit,
         })
     return posts
+
+
+def fetch_all_posts() -> list[dict]:
+    """Fetch new posts across every configured subreddit, in small batches
+    (BATCH_SIZE subreddits per combined feed request) with a delay between
+    batches. This balances two failure modes: one giant combined request
+    dilutes the shared `limit` across every subreddit (an active subreddit
+    can push a quiet one's posts out of the window); one request per
+    subreddit trips Reddit's anonymous rate limit almost immediately from
+    GitHub Actions' shared IP ranges. Small batches split the difference."""
+    all_posts = []
+    batches = _chunked(SUBREDDITS, BATCH_SIZE)
+    for i, batch in enumerate(batches):
+        if i > 0:
+            time.sleep(BATCH_DELAY_SECONDS)
+        all_posts.extend(fetch_one_batch(batch))
+    return all_posts
 
 
 # ---------------------------------------------------------------------------
