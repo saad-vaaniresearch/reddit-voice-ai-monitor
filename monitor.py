@@ -63,6 +63,9 @@ KEYWORDS = [
 
 REDDIT_LIMIT = 100  # max items per feed request
 USER_AGENT = "voice-ai-gtm-monitor/1.0 (by u/PlayfulTest4733)"
+FETCH_DELAY_SECONDS = 4  # gap between subreddit fetches - GitHub Actions runners share IPs
+                          # with heavy traffic, so Reddit rate-limits them more aggressively
+                          # than a normal residential IP
 
 OPENROUTER_MODEL = "inclusionai/ling-3.0-flash:free"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -102,17 +105,26 @@ def fetch_subreddit_posts(subreddit: str) -> list[dict]:
     logs and returns an empty list on any failure (missing/private subreddit,
     rate limit, network error, malformed feed)."""
     url = f"https://www.reddit.com/r/{urllib.parse.quote(subreddit)}/new.rss?limit={REDDIT_LIMIT}"
-    try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
-        if resp.status_code == 429:
-            print(f"WARNING: rate limited on r/{subreddit}, skipping this run", file=sys.stderr)
+    for attempt in range(2):  # one retry on rate limit, with a longer backoff
+        try:
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
+        except requests.RequestException as e:
+            print(f"WARNING: failed to fetch r/{subreddit}: {e}", file=sys.stderr)
             return []
+
+        if resp.status_code == 429:
+            if attempt == 0:
+                print(f"WARNING: rate limited on r/{subreddit}, backing off and retrying once", file=sys.stderr)
+                time.sleep(10)
+                continue
+            print(f"WARNING: rate limited on r/{subreddit} again, skipping this run", file=sys.stderr)
+            return []
+
         if resp.status_code != 200:
             print(f"WARNING: r/{subreddit} returned HTTP {resp.status_code}, skipping", file=sys.stderr)
             return []
-    except requests.RequestException as e:
-        print(f"WARNING: failed to fetch r/{subreddit}: {e}", file=sys.stderr)
-        return []
+
+        break
 
     feed = feedparser.parse(resp.content)
     if feed.bozo and not feed.entries:
@@ -264,7 +276,10 @@ def main() -> None:
     total_keyword_matches = 0
     total_alerts = 0
 
-    for subreddit in SUBREDDITS:
+    for i, subreddit in enumerate(SUBREDDITS):
+        if i > 0:
+            time.sleep(FETCH_DELAY_SECONDS)  # avoid tripping Reddit's anonymous rate limit
+
         posts = fetch_subreddit_posts(subreddit)
         total_fetched += len(posts)
 
