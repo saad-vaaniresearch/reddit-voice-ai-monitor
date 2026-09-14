@@ -62,7 +62,7 @@ KEYWORDS = [
 ]
 
 REDDIT_LIMIT = 100  # max items per feed request
-USER_AGENT = "voice-ai-gtm-monitor/1.0 (by u/your-reddit-username)"
+USER_AGENT = "voice-ai-gtm-monitor/1.0 (by u/PlayfulTest4733)"
 
 OPENROUTER_MODEL = "inclusionai/ling-3.0-flash:free"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
