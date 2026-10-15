@@ -1,0 +1,23 @@
+# One subreddit per line (r/ prefix optional). '#' starts a comment.
+# Site-wide search (SEARCH_QUERIES in monitor.py) also finds voice AI threads
+# in subreddits not listed here.
+VoiceAutomationAI
+AIVoice_Agents
+AIReceptionists
+voice_ai_agency
+speechtech
+vapiai
+VoiceAI
+AI_Agents
+AiAutomations
+AgentsOfAI
+SideProject
+alphaandbetausers
+indiehackers
+startups
+automation
+CustomerService
+CallCenters
+Telecommunications
+AI
+IndiaBiz
