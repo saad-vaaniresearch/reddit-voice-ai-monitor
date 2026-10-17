@@ -107,7 +107,7 @@ WEAK_KEYWORDS = [
     r"missed calls?", r"after[- ]hours calls?", r"answering service", r"receptionist",
     r"telecall\w*", r"telemarketing", r"phone calls?", r"customer support calls?",
     r"collections? calls?", r"lead qualification", r"appointment (?:booking|setting)",
-    r"hinglish", r"voice", r"voice clon\w*", r"ai voices?",
+    r"hinglish",
 ]
 CONTEXT_WORDS = [
     r"ai", r"automat\w+", r"bot", r"agent", r"gpt", r"llm", r"replace", r"scale",
