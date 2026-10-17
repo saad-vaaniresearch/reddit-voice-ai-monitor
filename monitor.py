@@ -47,7 +47,8 @@ USER_AGENT = os.environ.get("USER_AGENT", "voice-ai-gtm-monitor/2.0 (by u/Playfu
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 COMMENTS_ENABLED = os.environ.get("COMMENTS_ENABLED", "1") == "1"
-MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.6"))
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.75"))
+MIN_CONFIDENCE_UNTRACKED = float(os.environ.get("MIN_CONFIDENCE_UNTRACKED", "0.85"))  # subs found via search only
 MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "20"))
 MAX_AGE_HOURS = float(os.environ.get("MAX_AGE_HOURS", "36"))   # ignore stale threads
 MAX_LLM_CALLS_PER_RUN = int(os.environ.get("MAX_LLM_CALLS_PER_RUN", "6"))   # LLM requests/run
@@ -76,7 +77,7 @@ BATCH_DELAY_SECONDS = float(os.environ.get("BATCH_DELAY_SECONDS", "6"))  # floor
 
 # Site-wide Reddit search queries (each is one request). Quoted phrases = exact match.
 SEARCH_QUERIES = [
-    '"voice ai" OR "ai voice" OR "voice agent" OR "voice agents" OR voicebot OR "voice bot"',
+    '"voice ai" OR "voice agent" OR "voice agents" OR voicebot OR "voice bot"',
     '"ai receptionist" OR "virtual receptionist" OR "ai answering" OR "ai calling" OR "ai caller" OR "ai phone agent" OR "ai cold calling"',
     '"outbound calling" OR "call center automation" OR "call centre automation" OR "phone automation" OR "conversational ai" OR "voice automation"',
     '(IVR OR "call center" OR "call centre") AND (ai OR automation OR replace OR alternative)',
@@ -85,7 +86,7 @@ SEARCH_QUERIES = [
 
 # Strong = clearly voice-AI. One hit is enough to go to the LLM.
 STRONG_KEYWORDS = [
-    r"voice ai", r"ai voice", r"voice agents?", r"voice ?bots?", r"voice assistants?",
+    r"voice ai", r"voice agents?", r"voice ?bots?", r"voice assistants?",
     r"ai receptionists?", r"virtual receptionists?", r"ai answering", r"ai phone",
     r"ai calling", r"ai call(?:er|s|ing)", r"ai cold call\w*", r"ai dialer",
     r"outbound (?:calling|calls|voice)", r"inbound (?:calls|voice)",
@@ -93,7 +94,6 @@ STRONG_KEYWORDS = [
     r"phone automation", r"call (?:cent(?:er|re)) automation", r"call automation",
     r"automated calls?", r"auto[- ]?dialer", r"predictive dialer", r"ivr",
     r"speech[- ]to[- ]text", r"text[- ]to[- ]speech", r"asr", r"tts", r"stt",
-    r"voice cloning", r"voice clone",
     r"vapi", r"retell(?: ai)?", r"bland(?:\.ai| ai)", r"synthflow", r"air ai",
     r"elevenlabs", r"deepgram", r"livekit", r"pipecat", r"vocode", r"play\.?ht",
     r"cartesia", r"assembly ?ai", r"twilio", r"exotel", r"knowlarity", r"ozonetel",
@@ -107,7 +107,7 @@ WEAK_KEYWORDS = [
     r"missed calls?", r"after[- ]hours calls?", r"answering service", r"receptionist",
     r"telecall\w*", r"telemarketing", r"phone calls?", r"customer support calls?",
     r"collections? calls?", r"lead qualification", r"appointment (?:booking|setting)",
-    r"hinglish", r"voice",
+    r"hinglish", r"voice", r"voice clon\w*", r"ai voices?",
 ]
 CONTEXT_WORDS = [
     r"ai", r"automat\w+", r"bot", r"agent", r"gpt", r"llm", r"replace", r"scale",
@@ -315,6 +315,8 @@ receptionists, call-center automation, or speech tech for phone calls - or a pai
 point voice AI directly solves (missed calls, expensive call centers, slow lead \
 follow-up, multilingual phone support).
 
+The topic must be voice AI for real-time CONVERSATIONS (phone calls, voice agents, IVR, receptionists, call centers) or the speech tech (ASR/TTS/telephony) used to build them. Voice AI in music, memes, gaming, celebrity voice filters, deepfakes, audiobooks, dubbing, or personal-assistant gadgets is NOT relevant, even if "AI voice" is mentioned.
+
 Mark relevant=false for: news/hype with no discussion hook, job postings, pure \
 self-promo or spam, homework, unrelated uses of the words ("voice" as opinion, \
 "call" as in a meeting, text chatbots with no voice/phone angle), threads that are \
@@ -519,6 +521,7 @@ def main() -> None:
         sys.exit(1)
 
     subreddits = load_subreddits()
+    tracked = {x.lower() for x in subreddits}
     seen_list = load_seen_ids()
     seen = set(seen_list)
     log(f"Tracking {len(subreddits)} subreddits, {len(SEARCH_QUERIES)} search queries, "
@@ -591,7 +594,7 @@ def main() -> None:
             if not res.get("relevant"):
                 stats["irrelevant"] += 1
                 handled.append(it["id"])
-            elif conf < MIN_CONFIDENCE:
+            elif conf < (MIN_CONFIDENCE if it["subreddit"].lower() in tracked else MIN_CONFIDENCE_UNTRACKED):
                 stats["low_conf"] += 1
                 handled.append(it["id"])
             elif send_slack_alert(it, res, competitors_in(f"{it['title']} {it['body']}")):
